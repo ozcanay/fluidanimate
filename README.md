@@ -1,6 +1,6 @@
 # How to build
 ```
-mkdir build && cd build && cmake .. && make -j && cp ../in_5K.fluid .
+mkdir build && cd build && cmake .. && make -j && cp ../in_5K.fluid . && cp ../in_15K.fluid .
 ```
 
 # How to run
@@ -8,14 +8,14 @@ mkdir build && cd build && cmake .. && make -j && cp ../in_5K.fluid .
 ./fluidanimate 4 1 in_5K.fluid output_file
 ```
 
-# How to optimize cache coherence
-gi: 0, sx: 0, ex: 8, sy: 0, ey: 21, sz: 0, ez: 8
-gi: 1, sx: 0, ex: 8, sy: 0, ey: 21, sz: 8, ez: 15
-gi: 2, sx: 8, ex: 15, sy: 0, ey: 21, sz: 0, ez: 8
-gi: 3, sx: 8, ex: 15, sy: 0, ey: 21, sz: 8, ez: 15
+or 
 
-# Tip
-```Cell```s are what is shared among threads.
+```
+./fluidanimate 4 1 in_15K.fluid output_file
+```
+
+# Gist
+```Cell```s are what is shared among threads. We kept track addresses accessed by threads. Then we found which thread pairs accessed how many common addresses. Pinning will be done with the help of this.
 
 # Questions
 
