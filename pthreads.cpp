@@ -1,12 +1,19 @@
 // Code written by Richard O. Lee and Christian Bienia
 // Modified by Christian Fensch
 
+#include <unistd.h>
+
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <vector>
+
+#include "cha.hpp"
+#include "topology.hpp"
 #if defined(WIN32)
 #define NOMINMAX
 #include <windows.h>
@@ -25,6 +32,40 @@
 #include "cellpool.hpp"
 #include "fluid.hpp"
 #include "parsec_barrier.hpp"
+
+void stick_this_thread_to_core(int core_id) {
+    int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (core_id < 0 || core_id >= num_cores) {
+        std::cerr << "error binding thread to core: " << core_id << '\n';
+        // SPDLOG_ERROR("error binding thread to core {}!", core_id);
+        return;
+    }
+
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+
+    pthread_t current_thread = pthread_self();
+
+    int res = pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
+
+    if (res == 0) {
+        // std::cout << "thread bound to core " << core_id << std::endl;
+        //        SPDLOG_INFO("Thread bound to core {} successfully.", core_id);
+    } else {
+        //        SPDLOG_ERROR("Error in binding this thread to core {}.", core_id);
+    }
+}
+
+void assertRoot() {
+    uid_t uid = getuid();
+    if (uid == 0) {
+        std::cout << "Running as root." << std::endl;
+    } else {
+        std::cerr << "Not running as root. Need root privileges to run the app. Exiting.\n";
+        exit(EXIT_FAILURE);
+    }
+}
 
 std::mutex map_mutex;
 std::map<int, std::multiset<Cell *>>
@@ -1205,6 +1246,11 @@ void AdvanceFrameVisualization() {
 ////////////////////////////////////////////////////////////////////////////////
 
 int main(int argc, char *argv[]) {
+    // 896 bytes: 14 whole cache lines. this means that a single Cell might potentially have its coherence managed by 14
+    // different CHAs.
+    std::cout << "Cell size: " << sizeof(Cell) << std::endl;
+    assertRoot();  // actually might not need this!
+
 #ifdef PARSEC_VERSION
 #define __PARSEC_STRING(x) #x
 #define __PARSEC_XSTRING(x) __PARSEC_STRING(x)
@@ -1332,8 +1378,99 @@ int main(int argc, char *argv[]) {
         std::cout << "total comm count: " << total_comm_count << ", t1: " << t1 << ", t2: " << t2 << endl;
     }
 
-    // TODO: add Topology class, cha finding, thread binding, timing related methods here. just copy paste them to this
-    // exact file to get the code up and running quickly.
+    // findCha(Cell) -> returns std::array<int, 14>, 14 chas will manage coherence. we will consider all of these chas.
+
+    int mapped_thread_count = 0;
+    auto it = ranked_cha_access_count_per_pair.begin();
+    auto it1 = total_comm_count_t1_t2.begin();
+    std::vector<int> thread_to_core(threadnum, -1);
+
+    // fprintf(stderr, "before topology creation\n");
+    auto topo = Topology(cha_core_map, CAPID6);
+    std::vector<Tile> mapped_tiles;
+    // SPDLOG_TRACE("~~~~~~~~~~~~~~~~");
+    //  fprintf(stderr, "before thread mapping creation\n");
+
+    // start
+    // it = ranked_cha_access_count_per_pair.begin();
+    while (mapped_tiles.size() < threadnum &&
+           /*it != ranked_cha_access_count_per_pair.end()*/ it1 != total_comm_count_t1_t2.end()) {
+        // std::pair<int, int> tid_pair(std::get<2>(*it), std::get<3>(*it));
+        std::pair<int, int> tid_pair(std::get<1>(*it1), std::get<2>(*it1));
+        if (thread_to_core[tid_pair.first] == -1 && thread_to_core[tid_pair.second] == -1) {
+            // SPDLOG_TRACE("cha with max access: {}", std::get<1>(*it));
+            int cha_id = getMostAccessedCHA(tid_pair.first, tid_pair.second, ranked_cha_access_count_per_pair, topo);
+            if (cha_id == -1) {
+                // SPDLOG_INFO("error: cha is -1");
+                it1++;
+                continue;
+            }
+            // auto tile = topo.getTile(std::get<1>(*it));
+            auto tile = topo.getTile(cha_id);
+            // SPDLOG_TRACE("cha {}, is colocated with core {}", cha_id, tile.core);
+            // if (thread_to_core[tid_pair.first] == -1)
+            {
+                // SPDLOG_INFO("fetching a tile closest to tile with cha {} and core {}, cha supposed to be {}",
+                // tile.cha, tile.core, std::get<1>(*it));
+                auto closest_tile = topo.getClosestTile(tile, mapped_tiles);
+                // auto closest_tile = topo.getClosestTilewithThreshold(tile, mapped_tiles);
+                // SPDLOG_TRACE("* closest _available_ core to cha {} is: {}", tile.cha, closest_tile.core);
+                mapped_tiles.push_back(closest_tile);
+                thread_to_core[tid_pair.first] = closest_tile.core;
+                // SPDLOG_TRACE("assigned thread with id {} to core {}", tid_pair.first, closest_tile.core);
+            }
+#if 0
+            else
+            {
+                SPDLOG_TRACE("--> Already assigned thread with id {} to core {}, skipping it.", tid_pair.first, thread_to_core[tid_pair.first]);
+            }
+#endif
+
+            // if (thread_to_core[tid_pair.second] == -1)
+            {
+                // SPDLOG_INFO("fetching a tile closest to tile with cha {} and core {}, cha supposed to be {}",
+                // tile.cha, tile.core, std::get<1>(*it));
+                auto closest_tile = topo.getClosestTile(tile, mapped_tiles);
+                // auto closest_tile = topo.getClosestTilewithThreshold(tile, mapped_tiles);
+                // SPDLOG_TRACE("# closest _available_ core to cha {} is: {}", tile.cha, closest_tile.core);
+                mapped_tiles.push_back(closest_tile);
+                thread_to_core[tid_pair.second] = closest_tile.core;
+                // SPDLOG_TRACE("assigned thread with id {} to core {}", tid_pair.second, closest_tile.core);
+            }
+#if 0
+            else
+            {
+                SPDLOG_TRACE("--> Already assigned thread with id {} to core {}, skipping it.", tid_pair.second, thread_to_core[tid_pair.second]);
+            }
+#endif
+        }
+        //#if 0
+        else if (thread_to_core[tid_pair.first] == -1) {
+            auto tile = topo.getTileByCore(thread_to_core[tid_pair.second]);
+            auto closest_tile = topo.getClosestTile(tile, mapped_tiles);
+            mapped_tiles.push_back(closest_tile);
+            thread_to_core[tid_pair.first] = closest_tile.core;
+        } else if (thread_to_core[tid_pair.second] == -1) {
+            auto tile = topo.getTileByCore(thread_to_core[tid_pair.first]);
+            auto closest_tile = topo.getClosestTile(tile, mapped_tiles);
+            mapped_tiles.push_back(closest_tile);
+            thread_to_core[tid_pair.second] = closest_tile.core;
+        }
+        //#endif
+
+        it1++;
+    }
+    // end
+    int i = 0;
+    for (auto ptr : thread_to_core) {
+        std::cout << "thread " << i << " is mapped to core " << ptr << std::endl;
+        // SPDLOG_INFO("thread {} is mapped to core {} ", i, ptr);
+        i++;
+    }
+
+    // -> thread to core is the optimized binding. thread-0 will be bound to core thread_to_core[0] etc.
+
+    //////////////////// TODOs /////////////////
 
     // TODO: using "pairing_addresses", create ranked_cha_access_count_per_pair
     // set<tuple<cha_freq, cha, tid-a, tid-b>>
@@ -1354,7 +1491,32 @@ int main(int argc, char *argv[]) {
     // TODO: write a bash script and let the app run multiple times (at least 100). each run should last longer than 5
     // seconds.
 
+    // TODO: I should link to numa library and allocate memory via numa_alloc_onnode???
+    // I might not need this though: In Linux, the default behavior for memory allocation is "first-touch". This means
+    // that the memory will not be actually allocated to a specific NUMA node until the application first accesses it
+    // (e.g., writes to it). At that point, it will be allocated on the NUMA node local to the core that did the
+    // accessing. So, if core 0 (which is on NUMA node 0) is the first to access the memory, then it will be allocated
+    // on NUMA node 0.
+
     return 0;
+
+    using std::chrono::duration;
+    using std::chrono::duration_cast;
+    using std::chrono::high_resolution_clock;
+    using std::chrono::milliseconds;
+
+    auto t1 = high_resolution_clock::now();
+    // long_operation();
+    auto t2 = high_resolution_clock::now();
+
+    /* Getting number of milliseconds as an integer. */
+    auto ms_int = duration_cast<milliseconds>(t2 - t1);
+
+    /* Getting number of milliseconds as a double. */
+    duration<double, std::milli> ms_double = t2 - t1;
+
+    std::cout << ms_int.count() << "ms\n";
+    std::cout << ms_double.count() << "ms\n";
 }
 
 ////////////////////////////////////////////////////////////////////////////////

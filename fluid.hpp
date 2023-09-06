@@ -23,7 +23,7 @@ typedef unsigned __int8 uint8_t;
 //#define ENABLE_DOUBLE_PRECISION
 
 // Our estimate for a cache line size on this machine
-#define CACHELINE_SIZE 128  // aydin: how is this 128?
+#define CACHELINE_SIZE 64
 
 // Maximum number of particles in a physical cell
 #define PARTICLES_PER_CELL 16
