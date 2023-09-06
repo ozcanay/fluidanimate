@@ -197,6 +197,7 @@ pthread_barrier_t
 typedef struct __thread_args {
     int tid;     // thread id, determines work partition
     int frames;  // number of frames to compute
+    int* bound_cores;
 } thread_args;   // arguments for threads
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1267,7 +1268,8 @@ void AdvanceFrameMT(int tid) {
 #ifndef ENABLE_VISUALIZATION
 void *AdvanceFramesMT(void *args) {
     thread_args *targs = (thread_args *)args;
-    std::cout << "tid: " << targs->tid << ", frames: " << targs->frames << std::endl;
+    stick_this_thread_to_core(targs->bound_cores[targs->tid]);
+    // std::cout << "tid: " << targs->tid << ", frames: " << targs->frames << std::endl;
 
     for (int i = 0; i < targs->frames; ++i) {
         AdvanceFrameMT(targs->tid);
@@ -1322,8 +1324,28 @@ std::vector<int> findChasOfCell(const Cell* cells)
     return res;
 }
 
+// https://stackoverflow.com/a/34461372/4645121
+// Global variables.
+const size_t bigger_than_cachesize = 20 * 1024 * 1024;
+volatile long *p = new long[bigger_than_cachesize]; // I made this volatile.
+void trashDataCaches()
+{
+    std::cout << "Trashing data caches just before the benchmark..." << std::endl;
+    // SPDLOG_INFO("Trashing data caches...");
+    for (int i = 0; i < bigger_than_cachesize; i++)
+    {
+        p[i] = rand();
+    }
+    std::cout << "Thrashed." << std::endl;
+    // SPDLOG_INFO("DONE Trashing data caches.");
+}
+
 int main(int argc, char *argv[]) {
     using namespace std;
+    using std::chrono::duration;
+    using std::chrono::duration_cast;
+    using std::chrono::high_resolution_clock;
+    using std::chrono::milliseconds;
     // Cell is of size 896 bytes: 14 whole cache lines. this means that a single Cell might potentially have its coherence managed by 14 different CHAs.
     std::cout << "Cell size: " << sizeof(Cell) << std::endl;
 
@@ -1372,6 +1394,10 @@ int main(int argc, char *argv[]) {
         std::cerr << "<threadnum> must at least be 1" << std::endl;
         return -1;
     }
+    if(threadnum > 28) {
+        std::cerr << "<threadnum> must be lower than the core count in a single socket (28). we will benchmark on a single socket!\n";
+        return -1;
+    }
     if (framenum < 1) {
         std::cerr << "<framenum> must at least be 1" << std::endl;
         return -1;
@@ -1396,12 +1422,26 @@ int main(int argc, char *argv[]) {
 #else
     thread_args targs[threadnum];
 #endif
+
+    std::vector<int> base_assigned_cores;
+    for (int i = 0; i < getCoreCount(); ++i)
+    {
+        if (i % 2 == 0)
+        {
+            base_assigned_cores.push_back(i);
+            // this is to bind cores in socket-0. all cores are even numbered in this socket.
+        }
+    }
+    assert(base_assigned_cores.size() == 28);
+
+    std::cout << "Started preprocessing with just 1 frame." << std::endl;
+    const auto preprocessing_start = high_resolution_clock::now();
     for (int i = 0; i < threadnum; ++i) {
         targs[i].tid = i;
-        targs[i].frames = framenum;
+        targs[i].frames = 1; // this is 1, for preprocessing purposes.
+        targs[i].bound_cores = base_assigned_cores.data();
         pthread_create(&thread[i], &attr, AdvanceFramesMT, &targs[i]);
     }
-
     // *** PARALLEL PHASE *** //
 #ifdef ENABLE_VISUALIZATION
     Visualize();
@@ -1414,8 +1454,7 @@ int main(int argc, char *argv[]) {
     __parsec_roi_end();
 #endif
 
-    if (argc > 4) SaveFile(argv[4]);
-    CleanUpSim();
+    // if (argc > 4) SaveFile(argv[4]); // skip this, do not need this for benchmark.
 
 #ifdef ENABLE_PARSEC_HOOKS
     __parsec_bench_end();
@@ -1427,9 +1466,11 @@ int main(int argc, char *argv[]) {
     //     }
     //     std::cout << std::endl;
     // }
-    std::cout << "total thread count: " << threadid_addresses_map.size() << std::endl;
 
-    assert(threadnum > 1);  // below algo depends on this.
+
+    // std::cout << "total thread count: " << threadid_addresses_map.size() << std::endl;
+
+    assert(threadnum > 1);  // below algo depends on this. we will find thread pairs.
     auto head = threadid_addresses_map.begin();
     auto tail = std::next(threadid_addresses_map.begin());
 
@@ -1439,13 +1480,13 @@ int main(int argc, char *argv[]) {
                                  // the same since thread pairs are unique at this point here. but now, will make it multiset
     std::multiset<tuple<int, int, int, int>, greater<>> total_cha_freq_count_t1_t2;
 
-    map<pair<int, int>, multiset<Cell *>> pairing_addresses;
+    // map<pair<int, int>, multiset<Cell *>> pairing_addresses;
     while (head != threadid_addresses_map.end()) {
         const auto orig_tail = tail;
         while (tail != threadid_addresses_map.end()) {
             const int t1 = head->first;
             const int t2 = tail->first;
-            cout << "head: " << t1 << ", tail: " << t2 << endl;
+            // cout << "head: " << t1 << ", tail: " << t2 << endl;
 
             const multiset<Cell *> t1_addresses = head->second;
             const multiset<Cell *> t2_addresses = tail->second;
@@ -1466,7 +1507,7 @@ int main(int argc, char *argv[]) {
 
             total_comm_count_t1_t2.insert({common_addresses.size(), t1, t2});
             
-            pairing_addresses[{t1, t2}] = common_addresses; // pairing is not used at the moment. here just for clarity.
+            // pairing_addresses[{t1, t2}] = common_addresses; // pairing is not used at the moment. here just for clarity.
             ++tail;
         }
         tail = std::next(orig_tail);
@@ -1482,12 +1523,14 @@ int main(int argc, char *argv[]) {
     //     total_comm_count_t1_t2.insert({common_address_count, t1, t2});
     // }
 
-    for (const auto &[total_comm_count, t1, t2] : total_comm_count_t1_t2) {
-        std::cout << "total comm count: " << total_comm_count << ", t1: " << t1 << ", t2: " << t2 << endl;
-    }
-    for (const auto &[freq, cha, t1, t2] : total_cha_freq_count_t1_t2) {
-        std::cout << "freq: " << freq << ", cha: " << cha << ", t1: " << t1 << ", t2: " << t2 << endl;
-    }    
+
+
+    // for (const auto &[total_comm_count, t1, t2] : total_comm_count_t1_t2) {
+    //     std::cout << "total comm count: " << total_comm_count << ", t1: " << t1 << ", t2: " << t2 << endl;
+    // }
+    // for (const auto &[freq, cha, t1, t2] : total_cha_freq_count_t1_t2) {
+    //     std::cout << "freq: " << freq << ", cha: " << cha << ", t1: " << t1 << ", t2: " << t2 << endl;
+    // }    
 
     int mapped_thread_count = 0;
     auto it = total_cha_freq_count_t1_t2.begin();
@@ -1496,7 +1539,6 @@ int main(int argc, char *argv[]) {
 
     // fprintf(stderr, "before topology creation\n");
     auto topo = Topology(cha_core_map, CAPID6);
-    topo.printTopology();
     std::vector<Tile> mapped_tiles;
     // SPDLOG_TRACE("~~~~~~~~~~~~~~~~");
     //  fprintf(stderr, "before thread mapping creation\n");
@@ -1571,6 +1613,11 @@ int main(int argc, char *argv[]) {
         it1++;
     }
     // end
+
+
+    const auto preprocessing_end = high_resolution_clock::now();
+    std::cout << "Ended preprocessing. elapsed time: " << duration_cast<milliseconds>(preprocessing_end - preprocessing_start).count() << "ms" << std::endl;
+
     int i = 0;
     for (auto ptr : thread_to_core) {
         std::cout << "thread " << i << " is mapped to core " << ptr << std::endl;
@@ -1578,20 +1625,103 @@ int main(int argc, char *argv[]) {
         i++;
     }
 
+    assert(thread_to_core.size() == threadnum);
+    topo.printTopology();
+
+
+    ///// CHA-AWARE BENCHMARK.
+
+
+
+
+    // now that we figured out the thread to core mapping, we go on with the actual benchmark!
+    // std::cout << "Warming up caches with 4 frames before cha-aware benchmark..." << std::endl;
+    // const auto cache_warmup2_start = high_resolution_clock::now();
+    // for (int i = 0; i < threadnum; ++i) {
+    //     targs[i].tid = i;
+    //     targs[i].frames = 4;
+    //     targs[i].bound_cores = thread_to_core.data();
+    //     pthread_create(&thread[i], &attr, AdvanceFramesMT, &targs[i]);
+    // }
+    // for (int i = 0; i < threadnum; ++i) {
+    //     pthread_join(thread[i], NULL);
+    // }
+    // const auto cache_warmup2_end = high_resolution_clock::now();
+    // std::cout << "Ended warmup. elapsed time: " << duration_cast<milliseconds>(cache_warmup2_end - cache_warmup2_start).count() << "ms" << std::endl;
+
+
+    // now that we figured out the thread to core mapping, we go on with the actual benchmark!
+    std::cout << "Now benchmarking cha-aware config with " << framenum << " frames..." << std::endl;
+    trashDataCaches();
+    const auto cha_aware_benchmark_start = high_resolution_clock::now();
+    for (int i = 0; i < threadnum; ++i) {
+        targs[i].tid = i;
+        targs[i].frames = framenum;
+        targs[i].bound_cores = thread_to_core.data();
+        pthread_create(&thread[i], &attr, AdvanceFramesMT, &targs[i]);
+    }
+    for (int i = 0; i < threadnum; ++i) {
+        pthread_join(thread[i], NULL);
+    }
+    const auto cha_aware_benchmark_end = high_resolution_clock::now();
+    std::cout << "Ended cha-aware benchmark. elapsed time: " << duration_cast<milliseconds>(cha_aware_benchmark_end - cha_aware_benchmark_start).count() << "ms" << std::endl;
+
+
+    ////// BASE
+
+    // std::cout << "Sleeping for 5 seconds before the base benchmark..." << std::endl;
+    // struct timespec ts;
+    // ts.tv_sec = 5; // 5 seconds
+    // ts.tv_nsec = 0; // 0 nanoseconds
+
+    // nanosleep(&ts, NULL);
+
+
+    // now that we figured out the thread to core mapping, we go on with the actual benchmark!
+    // std::cout << "Warming up caches with 4 frames before base benchmark..." << std::endl;
+    // const auto cache_warmup_start = high_resolution_clock::now();
+    // for (int i = 0; i < threadnum; ++i) {
+    //     targs[i].tid = i;
+    //     targs[i].frames = 4;
+    //     targs[i].bound_cores = base_assigned_cores.data();
+    //     pthread_create(&thread[i], &attr, AdvanceFramesMT, &targs[i]);
+    // }
+    // for (int i = 0; i < threadnum; ++i) {
+    //     pthread_join(thread[i], NULL);
+    // }
+    // const auto cache_warmup_end = high_resolution_clock::now();
+    // std::cout << "Ended warmup. elapsed time: " << duration_cast<milliseconds>(cache_warmup_end - cache_warmup_start).count() << "ms" << std::endl;
+
+    
+
+    // now that we figured out the thread to core mapping, we go on with the actual benchmark!
+    std::cout << "Now benchmarking base config with " << framenum << " frames..." << std::endl;
+    trashDataCaches();
+    const auto base_benchmark_start = high_resolution_clock::now();
+    for (int i = 0; i < threadnum; ++i) {
+        targs[i].tid = i;
+        targs[i].frames = framenum;
+        targs[i].bound_cores = base_assigned_cores.data();
+        pthread_create(&thread[i], &attr, AdvanceFramesMT, &targs[i]);
+    }
+    for (int i = 0; i < threadnum; ++i) {
+        pthread_join(thread[i], NULL);
+    }
+    const auto base_benchmark_end = high_resolution_clock::now();
+    std::cout << "Ended base benchmark. elapsed time: " << duration_cast<milliseconds>(base_benchmark_end - base_benchmark_start).count() << "ms" << std::endl;
+
+
+
+
+
+    CleanUpSim();
+
+
     // -> thread to core is the optimized binding. thread-0 will be bound to core thread_to_core[0] etc.
 
     //////////////////// TODOs /////////////////
 
-    // TODO: using "pairing_addresses", create ranked_cha_access_count_per_pair
-    // set<tuple<cha_freq, cha, tid-a, tid-b>>
-
-    // TODO: copy the mapping algo here.
-
     // TODO: warm cache before the benchmark so both versions can benefit from cache access initially.
-
-    // TODO: measure preprocessing overhead.
-
-    // TODO: compile on koc cascade.
 
     // TODO: run in_500K.fluid and in_300K.fluid files and benchmark it!
 
@@ -1609,24 +1739,6 @@ int main(int argc, char *argv[]) {
     // on NUMA node 0.
 
     return 0;
-
-    using std::chrono::duration;
-    using std::chrono::duration_cast;
-    using std::chrono::high_resolution_clock;
-    using std::chrono::milliseconds;
-
-    auto t1 = high_resolution_clock::now();
-    // long_operation();
-    auto t2 = high_resolution_clock::now();
-
-    /* Getting number of milliseconds as an integer. */
-    auto ms_int = duration_cast<milliseconds>(t2 - t1);
-
-    /* Getting number of milliseconds as a double. */
-    duration<double, std::milli> ms_double = t2 - t1;
-
-    std::cout << ms_int.count() << "ms\n";
-    std::cout << ms_double.count() << "ms\n";
 }
 
 ////////////////////////////////////////////////////////////////////////////////
