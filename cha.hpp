@@ -14,7 +14,7 @@ struct PagemapEntry {
 
 uint64_t compute_perm(uintptr_t physical_address);
 uintptr_t getPhysicalAddress(uintptr_t virtual_address);
-int findCHAByHashing(uintptr_t virtual_address, const std::vector<int>& base_sequence);
+int findCHAByHashing(uintptr_t virtual_address);
 int virt_to_phys_user(uintptr_t* paddr, pid_t pid, uintptr_t vaddr);
 uint64_t getIndex(uintptr_t physical_address);
 std::vector<int> readBaseSequence(const std::string& filename);

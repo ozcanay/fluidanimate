@@ -193,7 +193,7 @@ void Topology::printTopology() const {
                     oss << std::setw(justify_len) << text;
                     break;
                 default:
-                    std::cerr << "this should have beenunreachable.\n";
+                    std::cerr << "this should have been unreachable.\n";
                     // SPDLOG_ERROR("This should have been unreachable.");
                     abort();
                     break;

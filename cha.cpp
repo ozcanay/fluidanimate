@@ -11,8 +11,66 @@
 #include <iostream>
 #include <map>
 
-// TODO: this is not portable as is.
-static const std::vector<int> base_sequence_28_skx{
+
+uint64_t compute_perm(uintptr_t physical_address) {
+    // SPDLOG_TRACE("0b{:064b} (0x{:016x}) --> physical address, input to compute_perm func.", physical_address,
+    // physical_address);
+
+    // static const uint64_t SelectorMasks[14] = {0x4c8fc0000, 0x1d05380000, 0x262b8c0000, 0x41f500000, 0x2c6d780000,
+    //                                            0x2cd5140000, 0x21d80c0000, 0x3b3f480000, 0x3a03500000, 0x3033280000,
+    //                                            0x0, 0x1469b40000, 0x0, 0x0};
+
+    static const uint64_t SelectorMasks[14] = {0x32770c0000, 0x3433d40000, 0x39a2900000, 0x3857680000, 0x1ad2880000,
+                                               0x1a6ae40000, 0x2b2fc40000, 0x24b6540000, 0x3a03500000, 0xc7b100000,
+                                               0xaf7c80000,  0x28218c0000, 0x0,          0x0};
+
+    uint64_t computed_perm = 0;
+
+    for (int bit = 0; bit < 14; ++bit) {
+        auto permutation_selector_mask = SelectorMasks[bit];
+        // SPDLOG_TRACE("Selector mask: 0b{:b} --> binary; 0x{:x} --> hexadecimal", permutation_selector_mask,
+        // permutation_selector_mask);
+
+        uint64_t k = permutation_selector_mask & physical_address;  // bitwise AND with mask
+        // SPDLOG_TRACE("will AND below 2 numbers.");
+        // SPDLOG_TRACE("0b{:064b} (0x{:016x}) -> permutation_selector_mask", permutation_selector_mask,
+        // permutation_selector_mask); SPDLOG_TRACE("0b{:064b} (0x{:016x}) -> physical_address", physical_address,
+        // physical_address); SPDLOG_TRACE("0b{:064b} (0x{:016x}) -> AND (&) result.", k, k);
+
+        uint64_t j = __builtin_popcountl(k);  // count number of bits set
+        // SPDLOG_TRACE("Number of bits in 0b{:b} : {}", k, j);
+
+        uint64_t i = j % 2;  // compute parity
+        // SPDLOG_TRACE("Parity of 0b{:b}: {}", j, i);
+
+        computed_perm += (i << bit);  // scale and accumulate
+        // SPDLOG_TRACE("computed permutation += Parity ({}) << {} --> 0b{:b}", i, bit, computed_perm);
+    }
+
+    // SPDLOG_TRACE("Computed permutation for physical address 0x{:x}: {}", physical_address, computed_perm);
+
+    return (computed_perm);  /// why parentheses around variable here?
+}
+
+uintptr_t getPhysicalAddress(uintptr_t virtual_address) {
+    const pid_t pid = getpid();
+
+    uintptr_t physical_address = 0;
+
+    // SPDLOG_TRACE("getting physical address for virtual address (0x{:016x})", virtual_address);
+
+    if (virt_to_phys_user(&physical_address, pid, virtual_address)) {
+        // SPDLOG_ERROR("error: virt_to_phys_user");
+        return EXIT_FAILURE;
+    };
+
+    return physical_address;
+}
+
+/// it is important to get the pointer by reference so that we do not copy it here! Has trouble while working with space
+/// allocated by mmap().
+int findCHAByHashing(uintptr_t virtual_address) {
+static const std::vector<int> base_sequence{ // for 28 core SKX, CLX
     0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 17, 16, 19, 18, 21, 20, 23, 22, 25, 24, 27, 26, 1,
     16, 11, 18, 18, 19, 16, 17, 22, 23, 20, 21, 26, 27, 24, 25, 18, 3,  16, 9,  3,  2,  1,  0,  7,  6,  5,  4,  11, 10,
     9,  8,  15, 14, 13, 12, 13, 12, 15, 14, 9,  8,  11, 10, 5,  4,  7,  6,  1,  0,  3,  2,  12, 13, 6,  7,  24, 25, 26,
@@ -156,64 +214,6 @@ static const std::vector<int> base_sequence_28_skx{
     3,  2,  1,  0,  12, 13, 14, 15, 8,  9,  10, 11, 4,  5,  6,  7,  0,  1,  2,  3,  13, 12, 7,  6,  25, 24, 27, 26, 21,
     20, 23, 22, 17, 16, 19, 18};
 
-uint64_t compute_perm(uintptr_t physical_address) {
-    // SPDLOG_TRACE("0b{:064b} (0x{:016x}) --> physical address, input to compute_perm func.", physical_address,
-    // physical_address);
-
-    // static const uint64_t SelectorMasks[14] = {0x4c8fc0000, 0x1d05380000, 0x262b8c0000, 0x41f500000, 0x2c6d780000,
-    //                                            0x2cd5140000, 0x21d80c0000, 0x3b3f480000, 0x3a03500000, 0x3033280000,
-    //                                            0x0, 0x1469b40000, 0x0, 0x0};
-
-    static const uint64_t SelectorMasks[14] = {0x32770c0000, 0x3433d40000, 0x39a2900000, 0x3857680000, 0x1ad2880000,
-                                               0x1a6ae40000, 0x2b2fc40000, 0x24b6540000, 0x3a03500000, 0xc7b100000,
-                                               0xaf7c80000,  0x28218c0000, 0x0,          0x0};
-
-    uint64_t computed_perm = 0;
-
-    for (int bit = 0; bit < 14; ++bit) {
-        auto permutation_selector_mask = SelectorMasks[bit];
-        // SPDLOG_TRACE("Selector mask: 0b{:b} --> binary; 0x{:x} --> hexadecimal", permutation_selector_mask,
-        // permutation_selector_mask);
-
-        uint64_t k = permutation_selector_mask & physical_address;  // bitwise AND with mask
-        // SPDLOG_TRACE("will AND below 2 numbers.");
-        // SPDLOG_TRACE("0b{:064b} (0x{:016x}) -> permutation_selector_mask", permutation_selector_mask,
-        // permutation_selector_mask); SPDLOG_TRACE("0b{:064b} (0x{:016x}) -> physical_address", physical_address,
-        // physical_address); SPDLOG_TRACE("0b{:064b} (0x{:016x}) -> AND (&) result.", k, k);
-
-        uint64_t j = __builtin_popcountl(k);  // count number of bits set
-        // SPDLOG_TRACE("Number of bits in 0b{:b} : {}", k, j);
-
-        uint64_t i = j % 2;  // compute parity
-        // SPDLOG_TRACE("Parity of 0b{:b}: {}", j, i);
-
-        computed_perm += (i << bit);  // scale and accumulate
-        // SPDLOG_TRACE("computed permutation += Parity ({}) << {} --> 0b{:b}", i, bit, computed_perm);
-    }
-
-    // SPDLOG_TRACE("Computed permutation for physical address 0x{:x}: {}", physical_address, computed_perm);
-
-    return (computed_perm);  /// why parentheses around variable here?
-}
-
-uintptr_t getPhysicalAddress(uintptr_t virtual_address) {
-    const pid_t pid = getpid();
-
-    uintptr_t physical_address = 0;
-
-    // SPDLOG_TRACE("getting physical address for virtual address (0x{:016x})", virtual_address);
-
-    if (virt_to_phys_user(&physical_address, pid, virtual_address)) {
-        // SPDLOG_ERROR("error: virt_to_phys_user");
-        return EXIT_FAILURE;
-    };
-
-    return physical_address;
-}
-
-/// it is important to get the pointer by reference so that we do not copy it here! Has trouble while working with space
-/// allocated by mmap().
-int findCHAByHashing(uintptr_t virtual_address, const std::vector<int> &base_sequence) {
     const pid_t pid = getpid();
     uintptr_t physical_address = 0;
 

@@ -32,6 +32,69 @@
 #include "cellpool.hpp"
 #include "fluid.hpp"
 #include "parsec_barrier.hpp"
+#include "topology.hpp"
+
+int getMostAccessedCHA(int tid1,
+                       int tid2,
+                       std::multiset<std::tuple<int, int, int, int>, std::greater<>> ranked_cha_access_count_per_pair,
+                       Topology topo)
+{
+    int max = 0;
+    std::vector<int> considered_chas;
+    std::map<int, bool> considered_chas_flag;
+
+    auto it = ranked_cha_access_count_per_pair.begin();
+    while (it != ranked_cha_access_count_per_pair.end())
+    {
+        // std::pair<int, int> tid_pair(std::get<2>(*it), std::get<3>(*it));
+        if ((std::get<2>(*it) == tid1 && std::get<3>(*it) == tid2) || (std::get<3>(*it) == tid1 && std::get<2>(*it) == tid2))
+        {
+            // SPDLOG_INFO("returning {}", std::get<1>(*it));
+            max = std::get<0>(*it);
+            considered_chas_flag[std::get<1>(*it)] = true;
+            considered_chas.push_back(std::get<1>(*it));
+            break;
+        }
+        it++;
+    }
+
+    // SPDLOG_INFO("communication between threads {} and {} uses the following chas the most", std::get<1>(*it), std::get<0>(*it), max);
+    while (it != ranked_cha_access_count_per_pair.end())
+    {
+        // std::pair<int, int> tid_pair(std::get<2>(*it), std::get<3>(*it));
+        if ((std::get<2>(*it) == tid1 && std::get<3>(*it) == tid2) || (std::get<3>(*it) == tid1 && std::get<2>(*it) == tid2))
+        {
+            // SPDLOG_INFO("returning {}", std::get<1>(*it));
+            if (considered_chas_flag[std::get<1>(*it)] == false && std::get<0>(*it) > (0.9 * max))
+            {
+                // SPDLOG_INFO("cha {}, access count: {}, max: {}", std::get<1>(*it), std::get<0>(*it), max);
+                considered_chas_flag[std::get<1>(*it)] = true;
+                considered_chas.push_back(std::get<1>(*it));
+            }
+        }
+        it++;
+    }
+
+    int x_total = 0;
+    int y_total = 0;
+    int cha_count = 0;
+    // SPDLOG_INFO("communication between threads {} and {} involves the following CHAs:");
+    for (auto it1 : considered_chas)
+    {
+        auto tile = topo.getTile(it1);
+        x_total += tile.x;
+        y_total += tile.y;
+        cha_count++;
+        // SPDLOG_INFO("cha {}, x: {}, y: {}", tile.cha, tile.x, tile.y);
+    }
+
+    int x_coord = x_total / cha_count;
+    int y_coord = y_total / cha_count;
+    auto tile = topo.getTile(x_coord, y_coord);
+    // SPDLOG_INFO("the center of gravity is cha {}, x: {}, y: {}", tile.cha, tile.x, tile.y);
+    // approximate the algorithm now
+    return tile.cha;
+}
 
 void stick_this_thread_to_core(int core_id) {
     int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -268,9 +331,9 @@ void InitSim(char const *fileName, unsigned int threadnum) {
             grids[gi].sz = sz;
             grids[gi].ez = ez;
 
-            std::cout << "gi: " << gi << ", sx: " << grids[gi].sx << ", ex: " << grids[gi].ex
-                      << ", sy: " << grids[gi].sy << ", ey: " << grids[gi].ey << ", sz: " << grids[gi].sz
-                      << ", ez: " << grids[gi].ez << std::endl;
+            // std::cout << "gi: " << gi << ", sx: " << grids[gi].sx << ", ex: " << grids[gi].ex
+            //           << ", sy: " << grids[gi].sy << ", ey: " << grids[gi].ey << ", sz: " << grids[gi].sz
+            //           << ", ez: " << grids[gi].ez << std::endl;
         }
     }
     // std::exit(42);
@@ -1245,11 +1308,43 @@ void AdvanceFrameVisualization() {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+std::vector<int> findChasOfCell(const Cell* cells)
+{
+    std::vector<int> res;
+
+    const double* inspector = reinterpret_cast<const double*>(cells);
+    for(int i = 0; i < sizeof(Cell) / sizeof(double); i += (CACHELINE_SIZE / sizeof(double))) {
+        const auto cha = findCHAByHashing(reinterpret_cast<uintptr_t>(&inspector[i]));
+        // std::cout << "i: " << i << ", cha: " << cha << std::endl;
+        res.push_back(cha);
+    }
+
+    return res;
+}
+
 int main(int argc, char *argv[]) {
-    // 896 bytes: 14 whole cache lines. this means that a single Cell might potentially have its coherence managed by 14
-    // different CHAs.
+    using namespace std;
+    // Cell is of size 896 bytes: 14 whole cache lines. this means that a single Cell might potentially have its coherence managed by 14 different CHAs.
     std::cout << "Cell size: " << sizeof(Cell) << std::endl;
-    assertRoot();  // actually might not need this!
+
+    int res = posix_memalign((void **)(&cells), CACHELINE_SIZE, sizeof(struct Cell) * 1);
+    if(res == 0) {
+        std::cout << "posix_memalign success." << std::endl;
+    } else {
+        std::cerr << "posix_memalign errror.\n";
+    }
+
+    assert(static_cast<Cell*>(cells) != nullptr);
+
+
+    const auto cell_chas = findChasOfCell(cells);
+    // Cell is of size 896 bytes: 14 whole cache lines. this means that a single Cell will have its coherence managed by 14 CHAs. (not guaranteed to be distinct CHAs though)
+    assert(cell_chas.size() == 14);
+    for(const auto cell_cha : cell_chas) {
+        std::cout << "cha: " << cell_cha << std::endl;
+    }
+
+    // assertRoot();  // no need for this to find chas by hashing.
 
 #ifdef PARSEC_VERSION
 #define __PARSEC_STRING(x) #x
@@ -1338,7 +1433,12 @@ int main(int argc, char *argv[]) {
     auto head = threadid_addresses_map.begin();
     auto tail = std::next(threadid_addresses_map.begin());
 
-    using namespace std;
+    // this is ranked_communication_count_per_pair wrt spmv repo.
+    multiset<tuple<int, int, int>, greater<>>
+        total_comm_count_t1_t2;  // set should suffice (compared to multiset). no tuple will be
+                                 // the same since thread pairs are unique at this point here. but now, will make it multiset
+    std::multiset<tuple<int, int, int, int>, greater<>> total_cha_freq_count_t1_t2;
+
     map<pair<int, int>, multiset<Cell *>> pairing_addresses;
     while (head != threadid_addresses_map.end()) {
         const auto orig_tail = tail;
@@ -1350,43 +1450,53 @@ int main(int argc, char *argv[]) {
             const multiset<Cell *> t1_addresses = head->second;
             const multiset<Cell *> t2_addresses = tail->second;
 
-            std::multiset<Cell *> intersect;
+            std::multiset<Cell *> common_addresses;
             std::set_intersection(t1_addresses.begin(), t1_addresses.end(), t2_addresses.begin(), t2_addresses.end(),
-                                  std::inserter(intersect, intersect.begin()));
+                                  std::inserter(common_addresses, common_addresses.begin()));
 
-            pairing_addresses[{t1, t2}] = intersect;
+            std::unordered_map<int, int> cha_freq_map;
+            for(const Cell* common_addr : common_addresses) {
+                for(const auto cha : findChasOfCell(common_addr)) {
+                    ++cha_freq_map[cha];
+                }
+            }
+            for(const auto& [cha, freq] : cha_freq_map) {
+                total_cha_freq_count_t1_t2.insert({freq, cha, t1, t2});
+            }
+
+            total_comm_count_t1_t2.insert({common_addresses.size(), t1, t2});
+            
+            pairing_addresses[{t1, t2}] = common_addresses; // pairing is not used at the moment. here just for clarity.
             ++tail;
         }
         tail = std::next(orig_tail);
         ++head;
     }
 
-    // this is ranked_communication_count_per_pair wrt spmv repo.
-    set<tuple<int, int, int>, greater<>>
-        total_comm_count_t1_t2;  // set should suffice (compared to multiset). no tuple will be
-                                 // the same since thread pairs are unique at this point here.
-    for (const auto &[thread_pairs, addresses] : pairing_addresses) {
-        const auto t1 = thread_pairs.first;
-        const auto t2 = thread_pairs.second;
-        const auto common_address_count = addresses.size();
-        std::cout << "threads " << t1 << " and " << t2 << " have " << common_address_count << " common addresses"
-                  << endl;
-        total_comm_count_t1_t2.insert({common_address_count, t1, t2});
-    }
+    // for (const auto &[thread_pairs, common_addresses] : pairing_addresses) {
+    //     const auto t1 = thread_pairs.first;
+    //     const auto t2 = thread_pairs.second;
+    //     const auto common_address_count = common_addresses.size();
+    //     std::cout << "threads " << t1 << " and " << t2 << " have " << common_address_count << " common addresses"
+    //               << endl;
+    //     total_comm_count_t1_t2.insert({common_address_count, t1, t2});
+    // }
 
     for (const auto &[total_comm_count, t1, t2] : total_comm_count_t1_t2) {
         std::cout << "total comm count: " << total_comm_count << ", t1: " << t1 << ", t2: " << t2 << endl;
     }
-
-    // findCha(Cell) -> returns std::array<int, 14>, 14 chas will manage coherence. we will consider all of these chas.
+    for (const auto &[freq, cha, t1, t2] : total_cha_freq_count_t1_t2) {
+        std::cout << "freq: " << freq << ", cha: " << cha << ", t1: " << t1 << ", t2: " << t2 << endl;
+    }    
 
     int mapped_thread_count = 0;
-    auto it = ranked_cha_access_count_per_pair.begin();
+    auto it = total_cha_freq_count_t1_t2.begin();
     auto it1 = total_comm_count_t1_t2.begin();
     std::vector<int> thread_to_core(threadnum, -1);
 
     // fprintf(stderr, "before topology creation\n");
     auto topo = Topology(cha_core_map, CAPID6);
+    topo.printTopology();
     std::vector<Tile> mapped_tiles;
     // SPDLOG_TRACE("~~~~~~~~~~~~~~~~");
     //  fprintf(stderr, "before thread mapping creation\n");
@@ -1399,7 +1509,7 @@ int main(int argc, char *argv[]) {
         std::pair<int, int> tid_pair(std::get<1>(*it1), std::get<2>(*it1));
         if (thread_to_core[tid_pair.first] == -1 && thread_to_core[tid_pair.second] == -1) {
             // SPDLOG_TRACE("cha with max access: {}", std::get<1>(*it));
-            int cha_id = getMostAccessedCHA(tid_pair.first, tid_pair.second, ranked_cha_access_count_per_pair, topo);
+            int cha_id = getMostAccessedCHA(tid_pair.first, tid_pair.second, total_cha_freq_count_t1_t2, topo);
             if (cha_id == -1) {
                 // SPDLOG_INFO("error: cha is -1");
                 it1++;
