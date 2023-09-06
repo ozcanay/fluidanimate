@@ -27,7 +27,10 @@
 #include "parsec_barrier.hpp"
 
 std::mutex map_mutex;
-std::map<int, std::set<Cell *>> threadid_addresses_map;  // will use std::set_intersection. that is why I used std::set.
+std::map<int, std::multiset<Cell *>>
+    threadid_addresses_map;  // will use std::set_intersection. that is why I used a set. I picked multiset instead of
+                             // set since if a thread pair communicates over same addresses multiple times, I want to
+                             // take this into account.
 
 #ifdef ENABLE_VISUALIZATION
 #include "fluidview.hpp"
@@ -1276,13 +1279,13 @@ int main(int argc, char *argv[]) {
 #ifdef ENABLE_PARSEC_HOOKS
     __parsec_bench_end();
 #endif
-    for (const auto &[threadid, addresses] : threadid_addresses_map) {
-        std::cout << "thread id: " << threadid << " -- ";
-        for (const auto &address : addresses) {
-            std::cout << address << " -- ";
-        }
-        std::cout << std::endl;
-    }
+    // for (const auto &[threadid, addresses] : threadid_addresses_map) {
+    //     std::cout << "thread id: " << threadid << " -- ";
+    //     for (const auto &address : addresses) {
+    //         std::cout << address << " -- ";
+    //     }
+    //     std::cout << std::endl;
+    // }
     std::cout << "total thread count: " << threadid_addresses_map.size() << std::endl;
 
     assert(threadnum > 1);  // below algo depends on this.
@@ -1290,7 +1293,7 @@ int main(int argc, char *argv[]) {
     auto tail = std::next(threadid_addresses_map.begin());
 
     using namespace std;
-    map<pair<int, int>, set<Cell *>> pairing_addresses;
+    map<pair<int, int>, multiset<Cell *>> pairing_addresses;
     while (head != threadid_addresses_map.end()) {
         const auto orig_tail = tail;
         while (tail != threadid_addresses_map.end()) {
@@ -1298,10 +1301,10 @@ int main(int argc, char *argv[]) {
             const int t2 = tail->first;
             cout << "head: " << t1 << ", tail: " << t2 << endl;
 
-            const set<Cell *> t1_addresses = head->second;
-            const set<Cell *> t2_addresses = tail->second;
+            const multiset<Cell *> t1_addresses = head->second;
+            const multiset<Cell *> t2_addresses = tail->second;
 
-            std::set<Cell *> intersect;
+            std::multiset<Cell *> intersect;
             std::set_intersection(t1_addresses.begin(), t1_addresses.end(), t2_addresses.begin(), t2_addresses.end(),
                                   std::inserter(intersect, intersect.begin()));
 
@@ -1312,19 +1315,44 @@ int main(int argc, char *argv[]) {
         ++head;
     }
 
-    set<tuple<int, int, int>, greater<>> count_t1_t2;
+    // this is ranked_communication_count_per_pair wrt spmv repo.
+    set<tuple<int, int, int>, greater<>>
+        total_comm_count_t1_t2;  // set should suffice (compared to multiset). no tuple will be
+                                 // the same since thread pairs are unique at this point here.
     for (const auto &[thread_pairs, addresses] : pairing_addresses) {
         const auto t1 = thread_pairs.first;
         const auto t2 = thread_pairs.second;
         const auto common_address_count = addresses.size();
         std::cout << "threads " << t1 << " and " << t2 << " have " << common_address_count << " common addresses"
                   << endl;
-        count_t1_t2.insert({common_address_count, t1, t2});
+        total_comm_count_t1_t2.insert({common_address_count, t1, t2});
     }
 
-    for (const auto &[count, t1, t2] : count_t1_t2) {
-        std::cout << "count: " << count << ", t1: " << t1 << ", t2: " << t2 << endl;
+    for (const auto &[total_comm_count, t1, t2] : total_comm_count_t1_t2) {
+        std::cout << "total comm count: " << total_comm_count << ", t1: " << t1 << ", t2: " << t2 << endl;
     }
+
+    // TODO: add Topology class, cha finding, thread binding, timing related methods here. just copy paste them to this
+    // exact file to get the code up and running quickly.
+
+    // TODO: using "pairing_addresses", create ranked_cha_access_count_per_pair
+    // set<tuple<cha_freq, cha, tid-a, tid-b>>
+
+    // TODO: copy the mapping algo here.
+
+    // TODO: warm cache before the benchmark so both versions can benefit from cache access initially.
+
+    // TODO: measure preprocessing overhead.
+
+    // TODO: compile on koc cascade.
+
+    // TODO: run in_500K.fluid and in_300K.fluid files and benchmark it!
+
+    // TODO: compare "optimized" version with the default binding (just bind threads to cores 0 to n - 1, n being the
+    // total core count).
+
+    // TODO: write a bash script and let the app run multiple times (at least 100). each run should last longer than 5
+    // seconds.
 
     return 0;
 }
