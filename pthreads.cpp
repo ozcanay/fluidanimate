@@ -1346,6 +1346,12 @@ int main(int argc, char *argv[]) {
     using std::chrono::duration_cast;
     using std::chrono::high_resolution_clock;
     using std::chrono::milliseconds;
+
+    std::ofstream ofs("results.csv", std::ios_base::app);
+    std::string result;
+    result += std::string(argv[3]) + ',' + std::string(argv[1]) + ',' + std::string(argv[2]) + ',';
+
+
     // Cell is of size 896 bytes: 14 whole cache lines. this means that a single Cell might potentially have its coherence managed by 14 different CHAs.
     std::cout << "Cell size: " << sizeof(Cell) << std::endl;
 
@@ -1359,7 +1365,13 @@ int main(int argc, char *argv[]) {
     assert(static_cast<Cell*>(cells) != nullptr);
 
 
+    const auto cha_find_start = high_resolution_clock::now();
     const auto cell_chas = findChasOfCell(cells);
+    const auto cha_find_end = high_resolution_clock::now();
+    std::cout << "Ended cha finding. elapsed time: " << duration_cast<milliseconds>(cha_find_end - cha_find_start).count() << "ms" << std::endl;
+    result += std::to_string(duration_cast<milliseconds>(cha_find_end - cha_find_start).count()) + ',';
+
+
     // Cell is of size 896 bytes: 14 whole cache lines. this means that a single Cell will have its coherence managed by 14 CHAs. (not guaranteed to be distinct CHAs though)
     assert(cell_chas.size() == 14);
     for(const auto cell_cha : cell_chas) {
@@ -1432,6 +1444,8 @@ int main(int argc, char *argv[]) {
             // this is to bind cores in socket-0. all cores are even numbered in this socket.
         }
     }
+
+
     assert(base_assigned_cores.size() == 28);
 
     std::cout << "Started preprocessing with just 1 frame." << std::endl;
@@ -1617,6 +1631,7 @@ int main(int argc, char *argv[]) {
 
     const auto preprocessing_end = high_resolution_clock::now();
     std::cout << "Ended preprocessing. elapsed time: " << duration_cast<milliseconds>(preprocessing_end - preprocessing_start).count() << "ms" << std::endl;
+    result += std::to_string(duration_cast<milliseconds>(preprocessing_end - preprocessing_start).count()) + ',';
 
     int i = 0;
     for (auto ptr : thread_to_core) {
@@ -1665,7 +1680,7 @@ int main(int argc, char *argv[]) {
     }
     const auto cha_aware_benchmark_end = high_resolution_clock::now();
     std::cout << "Ended cha-aware benchmark. elapsed time: " << duration_cast<milliseconds>(cha_aware_benchmark_end - cha_aware_benchmark_start).count() << "ms" << std::endl;
-
+    result += std::to_string(duration_cast<milliseconds>(cha_aware_benchmark_end - cha_aware_benchmark_start).count()) + ',';
 
     ////// BASE
 
@@ -1709,9 +1724,10 @@ int main(int argc, char *argv[]) {
     }
     const auto base_benchmark_end = high_resolution_clock::now();
     std::cout << "Ended base benchmark. elapsed time: " << duration_cast<milliseconds>(base_benchmark_end - base_benchmark_start).count() << "ms" << std::endl;
+    result += std::to_string(duration_cast<milliseconds>(base_benchmark_end - base_benchmark_start).count());
+    result += '\n';
 
-
-
+    ofs << result;
 
 
     CleanUpSim();
